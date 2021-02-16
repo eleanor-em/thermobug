@@ -47,7 +47,9 @@ async fn get_data_since(state: web::Data<TempState>, web::Path((name, timestamp)
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load configuration
-    dotenv().expect("Failed to load .env file");
+    if let Err(_) = dotenv() {
+        println!("WARN: failed to load .env file");
+    }
 
     let mut keys = Vec::new();
     let mut bind_addr = "".to_string();
