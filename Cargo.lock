@@ -2124,7 +2124,7 @@ checksum = "f764005d11ee5f36500a149ace24e00e3da98b0158b3e2d53a7495660d3f4d60"
 
 [[package]]
 name = "thermobug"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "actix-web",
  "dotenv",

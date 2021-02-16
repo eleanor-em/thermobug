@@ -44,10 +44,15 @@ async fn get_data_since(state: web::Data<TempState>, web::Path((name, timestamp)
     }
 }
 
+#[get("/")]
+async fn get_summary(state: web::Data<TempState>) -> impl Responder {
+    HttpResponse::Ok().json(state.get_summary())
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     // Load configuration
-    if let Err(_) = dotenv() {
+    if dotenv().is_err() {
         println!("WARN: failed to load .env file");
     }
 
@@ -114,6 +119,7 @@ async fn main() -> std::io::Result<()> {
             .service(update)
             .service(get_recent_data)
             .service(get_data_since)
+            .service(get_summary)
             .default_service(web::to(|| HttpResponse::NotFound().json(Response::err("path not found"))))
     })
         .workers(workers)

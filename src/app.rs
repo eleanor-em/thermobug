@@ -93,6 +93,25 @@ impl TempState {
         }
     }
 
+    pub fn get_summary(&self) -> SummaryResponse {
+        let mut entries = HashMap::new();
+        for (key, value) in self.data.iter() {
+            let mut value = value.lock().unwrap().clone();
+            if !value.is_empty() {
+                value.sort();
+                let average_since = value.first().unwrap().timestamp;
+                let latest_c = value.last().unwrap().deg_c;
+                let count = value.len() as f32;
+                let average_c = value.into_iter().map(|m| m.deg_c).sum::<f32>() / count;
+                entries.insert(key.clone(), SummaryEntry {
+                    average_c, average_since, latest_c
+                });
+            }
+        }
+
+        SummaryResponse { entries }
+    }
+
     pub async fn persist(&self) {
         println!("Persisting state to database.");
         let data: HashMap<_, _> = self.data.iter()
@@ -131,9 +150,21 @@ impl TempState {
 }
 
 #[derive(Serialize)]
+pub struct SummaryResponse {
+    entries: HashMap<String, SummaryEntry>,
+}
+
+#[derive(Serialize)]
+pub struct SummaryEntry {
+    latest_c: f32,
+    average_c: f32,
+    average_since: u64,
+}
+
+#[derive(Serialize)]
 pub struct DataResponse {
     success: bool,
-    data: Vec<Measurement>
+    data: Vec<Measurement>,
 }
 
 impl DataResponse {
