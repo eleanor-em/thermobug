@@ -1,153 +1,61 @@
-use actix_web::{get, web, App, HttpResponse, HttpServer, Responder};
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
-use serde::Serialize;
-use dotenv::dotenv;
 use std::env;
+use std::iter::Iterator;
+use futures::stream::StreamExt;
 use std::process::exit;
 
-struct CycleVec<T: Clone> {
-    index: usize,
-    capacity: usize,
-    vec: Vec<T>,
-}
+use actix_web::{get, web, App, HttpResponse, HttpServer, Responder};
+use dotenv::dotenv;
 
-impl<T: Clone> CycleVec<T> {
-    fn with_capacity(capacity: usize) -> Self {
-        Self {
-            index: 0,
-            capacity,
-            vec: Vec::with_capacity(capacity)
-        }
-    }
-
-    fn push(&mut self, val: T) {
-        if self.vec.len() == self.capacity {
-            self.vec[self.index] = val;
-        } else {
-            self.vec.push(val);
-        }
-        self.index += 1;
-        if self.index == self.capacity {
-            self.index = 0;
-        }
-    }
-
-    fn as_inner(&self) -> Vec<T> {
-        self.vec.clone()
-    }
-}
-
-#[derive(Copy, Clone, Serialize)]
-struct Measurement {
-    deg_c: f32,
-    time: u64
-}
-
-impl Measurement {
-    fn new(deg_c: u16) -> Self {
-        Self {
-            deg_c: deg_c as f32 / 10.0,
-            time: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_millis() as u64
-        }
-    }
-}
-
-struct TempState {
-    data: HashMap<String, Mutex<CycleVec<Measurement>>>,
-}
-
-impl TempState {
-    fn new(max_records: usize, keys: Vec<String>) -> Self {
-        let mut data = HashMap::new();
-        for key in keys {
-            data.insert(key, Mutex::new(CycleVec::with_capacity(max_records)));
-        }
-        Self { data }
-    }
-
-    fn update(&self, name: &str, value: u16) -> bool {
-        if let Some(inner) = self.data.get(name) {
-            let mut data = inner.lock().unwrap();
-            data.push(Measurement::new(value));
-            true
-        } else {
-            false
-        }
-    }
-
-    fn get(&self, name: &str) -> Option<Vec<Measurement>> {
-        if let Some(inner) = self.data.get(name) {
-            Some(inner.lock().unwrap().as_inner())
-        } else {
-            None
-        }
-    }
-}
-
-#[derive(Serialize)]
-struct DataResponse {
-    status_code: bool,
-    data: Vec<Measurement>
-}
-
-impl DataResponse {
-    fn new(data: Vec<Measurement>) -> Self {
-        Self { status_code: true, data }
-    }
-}
-
-#[derive(Serialize)]
-struct Response {
-    status_code: bool,
-    status: Option<String>,
-}
-
-impl Response {
-    fn ok() -> Self {
-        Response {
-            status_code: true,
-            status: None
-        }
-    }
-
-    fn err(msg: &str) -> Self {
-        Response {
-            status_code: false,
-            status: Some(msg.to_string())
-        }
-    }
-}
+use thermobug::app::{DataResponse, Response, TempState};
+use thermobug::util::Measurement;
 
 #[get("/update/{name}/{temp}")]
 async fn update(state: web::Data<TempState>, web::Path((name, temp)): web::Path<(String, u16)>) -> impl Responder {
-    if state.update(&name, temp) {
+    if state.update(&name, temp).await {
         HttpResponse::Ok().json(Response::ok())
     } else {
-        HttpResponse::BadRequest().json(Response::err("Unrecognised data source"))
+        HttpResponse::BadRequest().json(Response::err("unrecognised data source"))
     }
 }
 
-#[get("/data/{name}")]
-async fn get_data(state: web::Data<TempState>, web::Path(name): web::Path<String>) -> impl Responder {
+#[get("/recent/{name}")]
+async fn get_recent_data(state: web::Data<TempState>, web::Path(name): web::Path<String>) -> impl Responder {
     if let Some(data) = state.get(&name) {
         HttpResponse::Ok().json(DataResponse::new(data))
     } else {
-        HttpResponse::BadRequest().json(Response::err("Unrecognised data source"))
+        HttpResponse::BadRequest().json(Response::err("unrecognised data source"))
+    }
+}
+
+#[get("/all/{name}/since/{timestamp}")]
+async fn get_data_since(state: web::Data<TempState>, web::Path((name, timestamp)): web::Path<(String, u64)>) -> impl Responder {
+    if let Some(mut cursor) = state.get_since(&name, timestamp).await {
+        let mut data = Vec::new();
+        while let Some(Ok(doc)) = cursor.next().await {
+            let deg_c = doc.get_i64("deg_c").unwrap() as f32 / 10.0;
+            let timestamp = doc.get_i64("timestamp").unwrap() as u64;
+            data.push(Measurement {
+                deg_c, timestamp
+            });
+        }
+        HttpResponse::Ok().json(DataResponse::new(data))
+    } else {
+        HttpResponse::BadRequest().json(Response::err("unrecognised data source"))
     }
 }
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    // Load configuration
     dotenv().expect("Failed to load .env file");
 
     let mut keys = Vec::new();
     let mut bind_addr = "".to_string();
     let mut max_records = 60 * 60 * 24;
+    let mut workers = num_cpus::get();
+    let mut db_addr = "mongodb://localhost:27017".to_string();
+    let mut db_name = "thermobug".to_string();
+    let mut persist_interval: u64 = 60 * 60;
 
     for (key, value) in env::vars() {
         if key == "THERMOBUG_KEYS" {
@@ -159,6 +67,16 @@ async fn main() -> std::io::Result<()> {
         } else if key == "THERMOBUG_MAX_RECORDS" {
             max_records = value.parse()
                 .expect("Incorrectly formatted THERMOBUG_MAX_RECORDS argument.");
+        } else if key == "THERMOBUG_WORKER_THREADS" {
+            workers = value.parse()
+                .expect("Incorrectly formatted THERMOBUG_WORKER_THREADS argument.");
+        } else if key == "THERMOBUG_DB_ADDR" {
+            db_addr = value;
+        } else if key == "THERMOBUG_DB_NAME" {
+            db_name = value;
+        } else if key == "THERMOBUG_PERSIST_INTERVAL" {
+            persist_interval = value.parse()
+                .expect("Incorrectly formatted THERMOBUG_PERSIST_INTERVAL argument.");
         }
     }
     if keys.is_empty() {
@@ -170,19 +88,35 @@ async fn main() -> std::io::Result<()> {
         exit(1);
     }
 
-    println!("Keys:\t\t{:?}", keys);
-    println!("Bind address:\t{}", bind_addr);
-    println!("Max records:\t{}", max_records);
+    println!("Keys:\t\t\t{:?}", keys);
+    println!("Bind address:\t\t{}", bind_addr);
+    println!("Max records:\t\t{}", max_records);
+    println!("Worker threads:\t\t{}", workers);
+    println!("Database address:\t{}", db_addr);
+    println!("Database name:\t\t{}", db_name);
+    println!("Persist interval:\t{} seconds", persist_interval);
     println!("Thermobug starting...");
 
-    let state = web::Data::new(TempState::new(max_records, keys.clone()));
+    let state = TempState::new(keys.clone(),
+                               max_records,
+                               db_addr,
+                               db_name,
+                               persist_interval)
+        .await
+        .expect("Failed to initialise web app");
+    let state = web::Data::new(state);
+
     HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
             .service(update)
-            .service(get_data)
+            .service(get_recent_data)
+            .service(get_data_since)
+            .default_service(web::to(|| HttpResponse::NotFound().json(Response::err("path not found"))))
     })
-        .bind(&bind_addr)?
+        .workers(workers)
+        .bind(&bind_addr)
+        .expect("Failed to start server.")
         .run()
         .await
 }
