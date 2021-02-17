@@ -1,8 +1,9 @@
 FROM debian:buster-slim
 RUN apt update \
-  && apt full-upgrade -y
+  && apt full-upgrade -y \
   && apt install -y libssl-dev \
   && rm -rf /var/lib/apt/lists/*
+
 EXPOSE 8111
 RUN ["touch", ".env"]
 COPY ./target/release/thermobug /usr/local/bin/thermobug
