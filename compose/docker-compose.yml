@@ -1,27 +1,37 @@
 version: "3"
 services:
-  app:
-    container_name: "thermobug"
+  thermobug-app:
+    container_name: thermobug-app
     restart: always
-    build: ../
+    image: eleanorem/thermobug
     ports:
       - "8111:8111"
-    links:
-      - mongo
+    networks:
+      - thermobug-net
     environment:
-      - THERMOBUG_KEYS=server,backup,cluster1,cluster2,cluster3,cluster4
+      - THERMOBUG_KEYS=ouranos,atlas,bellerophon,cerberus,daedalus,eurydice
       - THERMOBUG_BIND_ADDR=0.0.0.0:8111
       - THERMOBUG_MAX_RECORDS=7200
       - THERMOBUG_WORKER_THREADS=1
-      - THERMOBUG_DB_ADDR=mongodb://mongo:27017
+      - THERMOBUG_DB_ADDR=mongodb://thermobug-mongo:27017
       - THERMOBUG_DB_NAME=thermobug
       - THERMOBUG_PERSIST_INTERVAL=3600
-  mongo:
-    container_name: mongo
+  thermobug-mongo:
+    container_name: thermobug-mongo
+    restart: always
     image: mongo
     volumes:
-      - ./data:/data/db
+      - data:/data/db
     expose:
       - "27017"
     logging:
       driver: "none"
+    networks:
+      - thermobug-net
+
+networks:
+  thermobug-net:
+    driver: bridge
+
+volumes:
+  data:
